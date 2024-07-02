@@ -35,7 +35,7 @@ This project utilizes the YOLOv4-tiny model for detecting and tracking people us
 
 2. Run the script:
     ```bash
-    python cam.py
+    python single_cam.py
     ```
 
 3. Press `ctrl + c` to quit the application.
