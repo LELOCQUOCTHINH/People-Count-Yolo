@@ -1,5 +1,5 @@
 
-# Dual Camera People Counting System
+# RTSP Camera People Counting System
 
 This project utilizes the YOLOv4-tiny model for detecting and tracking people using two RTSP streams. It counts people entering and exiting a predefined area from both camera streams.
 
