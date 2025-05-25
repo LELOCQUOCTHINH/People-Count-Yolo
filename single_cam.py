@@ -1,27 +1,27 @@
+#!/usr/bin/env python3
 import cv2
 import numpy as np
-import imutils
-from picamera.array import PiRGBArray
-from picamera import PiCamera
+from picamera2 import Picamera2
 
 # Load YOLOv4-tiny model
 net = cv2.dnn.readNet("yolov4-tiny.weights", "yolov4-tiny.cfg")
 layer_names = net.getLayerNames()
 output_layers = [layer_names[i - 1] for i in net.getUnconnectedOutLayers()]
 
-# Initialize camera
-camera = PiCamera()
-camera.resolution = (320, 240)  # Reduced resolution for performance
-camera.framerate = 10
-raw_capture = PiRGBArray(camera, size=(320, 240))
+
+camera = Picamera2()
+
+config = camera.create_video_configuration(main={"size": (160, 120), "format": "RGB888"})
+camera.configure(config)
+camera.start()
 
 out_count = 0
 in_count = 0
-tracked_ids = {}  # Dictionary to track object IDs and their crossing status
+tracked_ids = {}  
 
-def create_tracker(tracker_type="CSRT"):
-    if tracker_type == 'CSRT':
-        return cv2.TrackerCSRT_create()
+def create_tracker(tracker_type="KCF"):
+    if tracker_type == "KCF":
+        return cv2.TrackerKCF_create()
     else:
         raise ValueError(f"Unsupported tracker type: {tracker_type}")
 
@@ -46,15 +46,14 @@ def calculate_iou(box1, box2):
     iou = inter_area / (box1_area + box2_area - inter_area) if (box1_area + box2_area - inter_area) > 0 else 0
     return iou
 
-frame_skip = 5  # Increased to reduce processing load
+frame_skip = 15  
 frame_count = 0
-max_trackers = 10  # Reduced to save resources
-min_bbox_size = 15
+max_trackers = 5  
+min_bbox_size = 10
 iou_threshold = 0.3
 
 trackers = []
-tracker_id = 0  # Unique ID for each tracker
-
+tracker_id = 0 
 def is_valid_bbox(bbox, width, height):
     x, y, w, h = bbox
     if w < min_bbox_size or h < min_bbox_size:
@@ -63,19 +62,18 @@ def is_valid_bbox(bbox, width, height):
         return False
     return True
 
-for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
-    image = frame.array
-    frame_count += 1
-    if frame_count % frame_skip != 0:
-        raw_capture.truncate(0)
-        continue
+try:
+    while True:
+        image = camera.capture_array()
+        frame_count += 1
+        if frame_count % frame_skip != 0:
+            continue
 
-    height, width, _ = image.shape
-    line_start = (0, height // 2)
-    line_end = (width, height // 2)
+        height, width, _ = image.shape
+        line_start = (0, height // 2)
+        line_end = (width, height // 2)
 
-    if frame_count % (frame_skip * 5) == 0:
-        blob = cv2.dnn.blobFromImage(image, 0.00392, (416, 416), (0, 0, 0), True, crop=False)
+        blob = cv2.dnn.blobFromImage(image, 0.00392, (160, 160), (0, 0, 0), True, crop=False) 
         net.setInput(blob)
         detections = net.forward(output_layers)
 
@@ -87,7 +85,7 @@ for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port
                 scores = obj[5:]
                 class_id = np.argmax(scores)
                 confidence = scores[class_id]
-                if confidence > 0.2 and class_id == 0:  # Class 0 is 'person'
+                if confidence > 0.2 and class_id == 0:  
                     center_x = int(obj[0] * width)
                     center_y = int(obj[1] * height)
                     w = int(obj[2] * width)
@@ -101,59 +99,57 @@ for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port
 
         indices = cv2.dnn.NMSBoxes(boxes, confidences, score_threshold=0.2, nms_threshold=iou_threshold)
 
+      
         new_trackers = []
-        for tracker, bbox, tid in trackers:
+        for tracker, prev_bbox, tid in trackers:
             ok, new_bbox = tracker.update(image)
             if ok and is_valid_bbox(new_bbox, width, height):
-                new_trackers.append((tracker, new_bbox, tid))
+                x, y, w, h = [int(v) for v in new_bbox]
+                current_position = (x + w // 2, y + h // 2)
+                prev_position = (prev_bbox[0] + prev_bbox[2] // 2, prev_bbox[1] + prev_bbox[3] // 2)
 
+                prev_above = is_above_line(prev_position[0], prev_position[1], line_start, line_end)
+                curr_above = is_above_line(current_position[0], current_position[1], line_start, line_end)
+
+                if prev_above and not curr_above and tracked_ids[tid] is None:
+                    in_count += 1
+                    tracked_ids[tid] = "in"
+                elif not prev_above and curr_above and tracked_ids[tid] is None:
+                    out_count += 1
+                    tracked_ids[tid] = "out"
+
+                new_trackers.append((tracker, new_bbox, tid))
+              
         trackers = new_trackers
 
+      
         if len(indices) > 0:
             for i in indices.flatten():
                 bbox = boxes[i]
                 if len(trackers) < max_trackers:
                     best_iou = 0
-                    best_tracker_idx = -1
-                    for idx, (_, tracked_bbox, _) in enumerate(trackers):
+                    for _, tracked_bbox, _ in trackers:
                         iou = calculate_iou(bbox, tracked_bbox)
                         if iou > best_iou:
                             best_iou = iou
-                            best_tracker_idx = idx
-
-                    if best_iou < 0.3:  # If no good match, create new tracker
+                    if best_iou < 0.3:  
                         try:
-                            tracker = create_tracker("CSRT")
+                            tracker = create_tracker("KCF")
                             tracker.init(image, bbox)
                             trackers.append((tracker, bbox, tracker_id))
-                            tracked_ids[tracker_id] = None  # None means not crossed yet
+                            tracked_ids[tracker_id] = None
                             tracker_id += 1
                         except Exception as e:
                             print(f"Failed to create tracker: {e}")
 
-    new_trackers = []
-    for tracker, bbox, tid in trackers:
-        ok, new_bbox = tracker.update(image)
-        if ok and is_valid_bbox(new_bbox, width, height):
-            x, y, w, h = [int(v) for v in new_bbox]
-            current_position = (x + w // 2, y + h // 2)
-            prev_position = (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2)
+        cv2.line(image, line_start, line_end, (0, 0, 255), 2)
+        cv2.putText(image, f'OUT: {out_count}', (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.putText(image, f'IN: {in_count}', (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+        cv2.imshow('Camera', image)
 
-            prev_above = is_above_line(prev_position[0], prev_position[1], line_start, line_end)
-            curr_above = is_above_line(current_position[0], current_position[1], line_start, line_end)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-            if prev_above and not curr_above and tracked_ids[tid] is None:
-                in_count += 1
-                tracked_ids[tid] = "in"
-            elif not prev_above and curr_above and tracked_ids[tid] is None:
-                out_count += 1
-                tracked_ids[tid] = "out"
-
-            new_trackers.append((tracker, new_bbox, tid))
-            cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.putText(image, f'ID: {tid}', (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-
-    trackers = new_trackers
-
-    cv2.line(image, line_start, line_end, (0, 0, 255), 2)
-    cv2.putText(image, f'OUT: {out_count}', (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+finally:
+    camera.stop()
+    cv2.destroyAllWindows()
