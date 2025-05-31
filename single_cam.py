@@ -116,7 +116,7 @@ def detection_thread():
 
     while running:
         try:
-            frame = frame_queue.get(timeout=0.1)  # Reduced timeout to avoid hanging
+            frame = frame_queue.get(timeout=0.1)
         except Empty:
             continue
 
@@ -126,7 +126,7 @@ def detection_thread():
 
         height, width, _ = frame.shape
 
-        # YOLO detection with smaller input size
+        # YOLO detection with increased input size
         blob = cv2.dnn.blobFromImage(frame, 0.00392, (96, 96), (0, 0, 0), True, crop=False)
         net.setInput(blob)
         detections = net.forward(output_layers)
@@ -139,7 +139,7 @@ def detection_thread():
                 scores = obj[5:]
                 class_id = np.argmax(scores)
                 confidence = scores[class_id]
-                if confidence > 0.05 and class_id == 0:  # 0 is 'person' in COCO
+                if confidence > 0.05:
                     center_x = int(obj[0] * width)
                     center_y = int(obj[1] * height)
                     w = int(obj[2] * width)
@@ -153,7 +153,6 @@ def detection_thread():
 
         indices = cv2.dnn.NMSBoxes(boxes, confidences, score_threshold=0.05, nms_threshold=0.5)
 
-        # Update trackers with new detections
         with lock:
             if len(indices) > 0:
                 for i in indices.flatten():
@@ -173,7 +172,7 @@ def detection_thread():
                                 tracker.init(frame, bbox)
                                 trackers.append((tracker, bbox, tracker_id))
                                 tracked_ids[tracker_id] = None
-                                logger.debug(f"Created tracker ID {tracker_id}")
+                                logger.debug(f"New tracker created with ID {tracker_id}")
                                 tracker_id += 1
                             except Exception as e:
                                 logger.error(f"Failed to initialize tracker: {e}")
@@ -219,7 +218,6 @@ def main():
         sys.exit(1)
 
     # Initialize input source
-    global video_fps
     if args.input.lower() == "picam":
         source = Picamera2()
         config = source.create_video_configuration(main={"size": (160, 120), "format": "RGB888"})
@@ -252,16 +250,16 @@ def main():
         last_time = time.time()
         tracker_update_counter = 0
         frame_count = 0
-        fps_start_time = time.time()
         start_time = time.time()
+        fps_start_time = time.time()
         while running:
-            # Capture frame
+            # Read frame from the selected input source
             if isinstance(source, Picamera2):
                 image = source.capture_array()
             else:
                 ret, image = source.read()
                 if not ret:
-                    print("End of video file")
+                    print("End of video or error reading frame")
                     running = False
                     # Print average resource usage and FPS
                     if cpu_usages:
@@ -281,16 +279,17 @@ def main():
                     break
                 image = cv2.resize(image, (160, 120))
 
+            frame_count += 1
             height, width, _ = image.shape
-            line_start = (0, height // 2)
+            line_start = (0, height // 2)  # Line at middle (y=60)
             line_end = (width, height // 2)
 
-            # Pass frame to detection thread (non-blocking)
+            # Pass frame to detection thread
             if frame_queue.full():
-                frame_queue.get()  # Remove old frame if queue is full
+                frame_queue.get()
             frame_queue.put(image.copy())
 
-            # Update trackers every other frame
+            # Update trackers every 2 frames to reduce CPU usage
             tracker_update_counter += 1
             if tracker_update_counter % 2 == 0:
                 with lock:
@@ -311,20 +310,19 @@ def main():
                                 if prev_above and not curr_above and abs(prev_position[1] - line_start[1]) <= buffer and tracked_ids[tid] is None:
                                     in_count += 1
                                     tracked_ids[tid] = "in"
+                                    logger.debug(f"Counted IN: Total IN = {in_count}")
                                     tb_client.send_telemetry(args.server_IP, args.Port, args.token, "entered_people", in_count)
                                     tb_client.send_telemetry(args.server_IP, args.Port, args.token, "exited_people", out_count)
                                     tb_client.send_telemetry(args.server_IP, args.Port, args.token, "people_inside", in_count - out_count)
-                                    logger.debug(f"Counted IN: Total IN = {in_count}")
                                 elif not prev_above and curr_above and abs(prev_position[1] - line_start[1]) <= buffer and tracked_ids[tid] is None:
                                     out_count += 1
                                     tracked_ids[tid] = "out"
+                                    logger.debug(f"Counted OUT: Total OUT = {out_count}")
                                     tb_client.send_telemetry(args.server_IP, args.Port, args.token, "exited_people", out_count)
                                     tb_client.send_telemetry(args.server_IP, args.Port, args.token, "entered_people", in_count)
                                     tb_client.send_telemetry(args.server_IP, args.Port, args.token, "people_inside", in_count - out_count)
-                                    logger.debug(f"Counted OUT: Total OUT = {out_count}")
 
                                 new_trackers.append((tracker, new_bbox, tid))
-                                # Draw bounding box, ID, and center point
                                 cv2.rectangle(image, (x, y), (x + w, y + h), (0, 255, 0), 1)
                                 cv2.putText(image, f'ID: {tid}', (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1)
                                 cv2.circle(image, current_position, 2, (255, 0, 0), -1)
@@ -338,12 +336,12 @@ def main():
                 cv2.putText(image, f'OUT: {out_count}', (5, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
                 cv2.putText(image, f'IN: {in_count}', (5, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
 
-            # Resize frame for display
+            # Resize frame for display to lower resolution
             display_frame = cv2.resize(image, (320, 240))
-            cv2.imshow('Video' if args.input.lower() != 'picam' else 'Camera', display_frame)
+            cv2.imshow('Video' if not isinstance(source, Picamera2) else 'Camera', display_frame)
 
             # Cap at video FPS or 10 FPS, whichever is lower
-            target_fps = min(video_fps, 10) if args.input.lower() != 'picam' else 10
+            target_fps = min(video_fps, 10) if not isinstance(source, Picamera2) else 10
             current_time = time.time()
             elapsed = current_time - last_time
             if elapsed < 1/target_fps:
@@ -351,7 +349,6 @@ def main():
             last_time = current_time
 
             # Calculate and send FPS every 10 seconds
-            frame_count += 1
             elapsed_time = current_time - fps_start_time
             if elapsed_time >= 10:
                 fps = frame_count / elapsed_time
@@ -372,8 +369,8 @@ def main():
                 if fps_values:
                     print(f"Average FPS: {sum(fps_values)/len(fps_values):.2f}")
                 # Print playback speed
-                total_time = time.time() - start_time
-                if args.input.lower() != 'picam':
+                if not isinstance(source, Picamera2):
+                    total_time = time.time() - start_time
                     total_frames = source.get(cv2.CAP_PROP_FRAME_COUNT)
                     expected_time = total_frames / video_fps
                     playback_speed = expected_time / total_time
@@ -383,7 +380,7 @@ def main():
     finally:
         if source:
             if isinstance(source, Picamera2):
-                source.shutdown()
+                source.stop()
             else:
                 source.release()
         if tb_client:
