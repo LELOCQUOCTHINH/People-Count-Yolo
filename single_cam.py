@@ -109,7 +109,7 @@ def is_valid_bbox(bbox, width, height):
 # Detection thread function
 def detection_thread():
     global trackers, tracker_id, tracked_ids
-    max_trackers = 5
+    max_trackers = 10
     iou_threshold = 0.3
     frame_skip = 5  # Increased to reduce detection frequency
     frame_count = 0
